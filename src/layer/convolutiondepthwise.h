@@ -46,16 +46,20 @@ public:
 
     int weight_data_size;
     int group;
-    float weight_data_int8_scale;
+
+    int int8_scale_term;
 
     // model
     Mat weight_data;
     Mat bias_data;
 
+    Mat weight_data_int8_scales;
+    Mat bottom_blob_int8_scales;
+
     bool use_int8_inference;
 
-    ncnn::Layer* quantize;
-    ncnn::Layer* dequantize;
+    std::vector<ncnn::Layer*> quantize_ops;
+    std::vector<ncnn::Layer*> dequantize_ops;
 };
 
 } // namespace ncnn

@@ -16,6 +16,91 @@
 #include <arm_neon.h>
 #endif // __ARM_NEON
 
+#if __aarch64__
+static void conv1x1s1_int8_neon(const Mat &bottom_blob, Mat &top_blob, const Mat &_kernel, const Option& opt)
+{
+    int inch = bottom_blob.c;
+
+    int outw = top_blob.w;
+    int outh = top_blob.h;
+    int outch = top_blob.c;
+
+    const float *kernel = _kernel;
+
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (int p = 0; p < outch; p++)
+    {
+        Mat out0 = top_blob.channel(p);
+
+        out0.fill(0);
+
+        int q = 0;
+
+        for (; q+7<inch; q+=8)
+        {
+            int* outptr0 = out0;
+
+            const signed char *kernel0 = (const signed char *)kernel + p * inch + q;
+
+            const signed char *r0 = bottom_blob.channel(q);
+            const signed char *r1 = bottom_blob.channel(q + 1);
+            const signed char *r2 = bottom_blob.channel(q + 2);
+            const signed char *r3 = bottom_blob.channel(q + 3);
+            const signed char *r4 = bottom_blob.channel(q + 4);
+            const signed char *r5 = bottom_blob.channel(q + 5);
+            const signed char *r6 = bottom_blob.channel(q + 6);
+            const signed char *r7 = bottom_blob.channel(q + 7);
+
+            int size = outw * outh;
+            int remain = size;
+
+            for (; remain > 0; remain--)
+            {
+                //ToDo Neon
+                int sum0 = (int)*r0 * (int)kernel0[0] + (int)*r1 * (int)kernel0[1] +
+                           (int)*r2 * (int)kernel0[2] + (int)*r3 * (int)kernel0[3] +
+                           (int)*r4 * (int)kernel0[4] + (int)*r5 * (int)kernel0[5] +
+                           (int)*r6 * (int)kernel0[6] + (int)*r7 * (int)kernel0[7];
+
+                *outptr0 += sum0;
+
+                r0++;
+                r1++;
+                r2++;
+                r3++;
+                r4++;
+                r5++;
+                r6++;
+                r7++;
+                outptr0++;
+            }
+        }
+
+        for (; q<inch; q++)
+        {
+            int* outptr0 = out0;
+
+            const signed char *r0 = bottom_blob.channel(q);
+
+            const signed char *kernel0 = (const signed char *)kernel + p * inch + q;
+            const signed char k0 = kernel0[0];
+
+            int size = outw * outh;
+            int remain = size;
+
+            for (; remain > 0; remain--)
+            {
+                int sum0 = (int)(*r0) * (int)k0;
+
+                *outptr0 += sum0;
+
+                r0++;
+                outptr0++;
+            }
+        }
+    }
+}
+#else // __aarch64__
 /*
  * Convolution 1x1 quantized with int8,unroll 8 x 4
  */
@@ -143,10 +228,8 @@ static void conv1x1s1_neon_s8(const Mat& bottom_blob, Mat& top_blob, const Mat& 
                     //outptr0_s32
                     "pld        [%1, #256]          \n"
                     "vld1.32    {d20-d23}, [%1:128] \n" //outptr0_s32
-                    "vmovl.s16  q4, d16             \n"
-                    "vmovl.s16  q5, d17             \n"
-                    "vadd.s32   q10, q4             \n"
-                    "vadd.s32   q11, q5             \n"
+                    "vaddw.s16   q10, q10, d16      \n"
+                    "vaddw.s16   q11, q11, d17      \n"
                     "vst1.32    {d20-d23}, [%1:128]!\n"
                     //###########################################
                     //load inch kernel_1 k0-k7
@@ -172,10 +255,8 @@ static void conv1x1s1_neon_s8(const Mat& bottom_blob, Mat& top_blob, const Mat& 
                     //outptr1_s32
                     "pld        [%2, #256]          \n"
                     "vld1.32    {d20-d23}, [%2:128] \n" //outptr1_s32
-                    "vmovl.s16  q4, d16             \n"
-                    "vmovl.s16  q5, d17             \n"
-                    "vadd.s32   q10, q4             \n"
-                    "vadd.s32   q11, q5             \n"
+                    "vaddw.s16   q10, q10, d16      \n"
+                    "vaddw.s16   q11, q11, d17      \n"
                     "vst1.32    {d20-d23}, [%2:128]!\n"
                     //############################################
                     //load inch kernel_2 k0-k7
@@ -201,10 +282,8 @@ static void conv1x1s1_neon_s8(const Mat& bottom_blob, Mat& top_blob, const Mat& 
                     //outptr2_s32
                     "pld        [%3, #256]          \n"
                     "vld1.32    {d20-d23}, [%3:128] \n" //outptr2_s32
-                    "vmovl.s16  q4, d16             \n"
-                    "vmovl.s16  q5, d17             \n"
-                    "vadd.s32   q10, q4             \n"
-                    "vadd.s32   q11, q5             \n"
+                    "vaddw.s16   q10, q10, d16      \n"
+                    "vaddw.s16   q11, q11, d17      \n"
                     "vst1.32    {d20-d23}, [%3:128]!\n"
                     //#############################################
                     //load inch kernel_3 k0-k7
@@ -230,10 +309,8 @@ static void conv1x1s1_neon_s8(const Mat& bottom_blob, Mat& top_blob, const Mat& 
                     //outptr3_s32
                     "pld        [%4, #256]          \n"
                     "vld1.32    {d20-d23}, [%4:128] \n" //outptr3_s32
-                    "vmovl.s16  q4, d16             \n"
-                    "vmovl.s16  q5, d17             \n"
-                    "vadd.s32   q10, q4             \n"
-                    "vadd.s32   q11, q5             \n"
+                    "vaddw.s16   q10, q10, d16      \n"
+                    "vaddw.s16   q11, q11, d17      \n"
                     "vst1.32    {d20-d23}, [%4:128]!\n"
 
                     //next
@@ -352,10 +429,8 @@ static void conv1x1s1_neon_s8(const Mat& bottom_blob, Mat& top_blob, const Mat& 
                     //outptr1_s32
                     "pld        [%2, #256]          \n"
                     "vld1.32    {d12-d15}, [%2]     \n"
-                    "vmovl.s16  q8, d10             \n"
-                    "vmovl.s16  q9, d11             \n"
-                    "vadd.s32   q6, q8              \n"
-                    "vadd.s32   q7, q9              \n"
+                    "vaddw.s16   q6, q6, d10        \n"
+                    "vaddw.s16   q7, q7, d11        \n"
                     "vst1.32    {d12-d15}, [%2]!    \n"
 
                     //mla
@@ -363,10 +438,8 @@ static void conv1x1s1_neon_s8(const Mat& bottom_blob, Mat& top_blob, const Mat& 
                     //outptr0_s32
                     "pld        [%3, #256]          \n"
                     "vld1.32    {d12-d15}, [%3]     \n"
-                    "vmovl.s16  q8, d10             \n"
-                    "vmovl.s16  q9, d11             \n"
-                    "vadd.s32   q6, q8              \n"
-                    "vadd.s32   q7, q9              \n"
+                    "vaddw.s16   q6, q6, d10        \n"
+                    "vaddw.s16   q7, q7, d11        \n"
                     "vst1.32    {d12-d15}, [%3]!    \n"
 
                     //mla
@@ -374,10 +447,8 @@ static void conv1x1s1_neon_s8(const Mat& bottom_blob, Mat& top_blob, const Mat& 
                     //outptr0_s32
                     "pld        [%4, #256]          \n"
                     "vld1.32    {d12-d15}, [%4]     \n"
-                    "vmovl.s16  q8, d10             \n"
-                    "vmovl.s16  q9, d11             \n"
-                    "vadd.s32   q6, q8              \n"
-                    "vadd.s32   q7, q9              \n"
+                    "vaddw.s16   q6, q6, d10        \n"
+                    "vaddw.s16   q7, q7, d11        \n"
                     "vst1.32    {d12-d15}, [%4]!    \n"
 
                     "subs       %0, #1              \n"
@@ -506,10 +577,8 @@ static void conv1x1s1_neon_s8(const Mat& bottom_blob, Mat& top_blob, const Mat& 
                     //outptr0_s32
                     "pld        [%1, #256]          \n"
                     "vld1.32    {d20-d23}, [%1]     \n" //outptr0_s32
-                    "vmovl.s16  q12, d28            \n"
-                    "vmovl.s16  q13, d29            \n"
-                    "vadd.s32   q10, q12            \n"
-                    "vadd.s32   q11, q13            \n"
+                    "vaddw.s16   q10, q10, d28      \n"
+                    "vaddw.s16   q11, q11, d29      \n"
                     "vst1.32    {d20-d23}, [%1]!    \n"
 
                     //next
@@ -588,10 +657,8 @@ static void conv1x1s1_neon_s8(const Mat& bottom_blob, Mat& top_blob, const Mat& 
                     //outptr0_s32
                     "pld        [%1, #256]          \n"
                     "vld1.32    {d12-d15}, [%1]     \n"
-                    "vmovl.s16  q8, d20             \n"
-                    "vmovl.s16  q9, d21             \n"
-                    "vadd.s32   q6, q8              \n"
-                    "vadd.s32   q7, q9              \n"
+                    "vaddw.s16   q6, q6, d20        \n"
+                    "vaddw.s16   q7, q7, d21        \n"
                     "vst1.32    {d12-d15}, [%1]!    \n"
 
                     "subs       %0, #1              \n"
@@ -743,10 +810,8 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr0_s32
                     "pld        [%1, #256]          \n"
                     "vld1.32    {d20-d23}, [%1:128] \n" //outptr0_s32
-                    "vmovl.s16  q4, d16             \n"
-                    "vmovl.s16  q5, d17             \n"
-                    "vadd.s32   q10, q4             \n"
-                    "vadd.s32   q11, q5             \n"
+                    "vaddw.s16   q10, q10, d16      \n"
+                    "vaddw.s16   q11, q11, d17      \n"
                     "vst1.32    {d20-d23}, [%1:128]!\n"
                     //###########################################
                     //load inch kernel_1 k0-k7
@@ -772,10 +837,8 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr1_s32
                     "pld        [%2, #256]          \n"
                     "vld1.32    {d20-d23}, [%2:128] \n" //outptr1_s32
-                    "vmovl.s16  q4, d16             \n"
-                    "vmovl.s16  q5, d17             \n"
-                    "vadd.s32   q10, q4             \n"
-                    "vadd.s32   q11, q5             \n"
+                    "vaddw.s16   q10, q10, d16      \n"
+                    "vaddw.s16   q11, q11, d17      \n"
                     "vst1.32    {d20-d23}, [%2:128]!\n"
                     //############################################
                     //load inch kernel_2 k0-k7
@@ -801,10 +864,8 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr2_s32
                     "pld        [%3, #256]          \n"
                     "vld1.32    {d20-d23}, [%3:128] \n" //outptr2_s32
-                    "vmovl.s16  q4, d16             \n"
-                    "vmovl.s16  q5, d17             \n"
-                    "vadd.s32   q10, q4             \n"
-                    "vadd.s32   q11, q5             \n"
+                    "vaddw.s16   q10, q10, d16      \n"
+                    "vaddw.s16   q11, q11, d17      \n"
                     "vst1.32    {d20-d23}, [%3:128]!\n"
                     //#############################################
                     //load inch kernel_3 k0-k7
@@ -830,10 +891,8 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr3_s32
                     "pld        [%4, #256]          \n"
                     "vld1.32    {d20-d23}, [%4:128] \n" //outptr3_s32
-                    "vmovl.s16  q4, d16             \n"
-                    "vmovl.s16  q5, d17             \n"
-                    "vadd.s32   q10, q4             \n"
-                    "vadd.s32   q11, q5             \n"
+                    "vaddw.s16   q10, q10, d16      \n"
+                    "vaddw.s16   q11, q11, d17      \n"
                     "vst1.32    {d20-d23}, [%4:128]!\n"
 
                     //next
@@ -928,8 +987,7 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr0_s32
                     "pld        [%1, #128]          \n"
                     "vld1.32    {d20-d21}, [%1:128] \n" //outptr0_s32
-                    "vmovl.s16  q4, d16             \n"
-                    "vadd.s32   q10, q4             \n"
+                    "vaddw.s16   q10, q10, d16      \n"
                     "vst1.32    {d20-d21}, [%1:128]!\n"
                     //###########################################
                     //load inch kernel_1 k0-k7
@@ -955,8 +1013,7 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr1_s32
                     "pld        [%2, #128]          \n"
                     "vld1.32    {d20-d21}, [%2:128] \n" //outptr1_s32
-                    "vmovl.s16  q4, d16             \n"
-                    "vadd.s32   q10, q4             \n"
+                    "vaddw.s16   q10, q10, d16      \n"
                     "vst1.32    {d20-d21}, [%2:128]!\n"
                     //############################################
                     //load inch kernel_2 k0-k7
@@ -982,8 +1039,7 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr2_s32
                     "pld        [%3, #256]          \n"
                     "vld1.32    {d20-d21}, [%3:128] \n" //outptr2_s32
-                    "vmovl.s16  q4, d16             \n"
-                    "vadd.s32   q10, q4             \n"
+                    "vaddw.s16   q10, q10, d16      \n"
                     "vst1.32    {d20-d21}, [%3:128]!\n"
                     //#############################################
                     //load inch kernel_3 k0-k7
@@ -1009,8 +1065,7 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr3_s32
                     "pld        [%4, #256]          \n"
                     "vld1.32    {d20-d21}, [%4:128] \n" //outptr3_s32
-                    "vmovl.s16  q4, d16             \n"
-                    "vadd.s32   q10, q4             \n"
+                    "vaddw.s16   q10, q10, d16      \n"
                     "vst1.32    {d20-d21}, [%4:128]!\n"
                     : "=r"(nn),          // %0
                       "=r"(outptr0),     // %1
@@ -1087,10 +1142,8 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr0_s32
                     "pld        [%1, #256]          \n"
                     "vld1.32    {d12-d15}, [%1]     \n"
-                    "vmovl.s16  q8, d10             \n"
-                    "vmovl.s16  q9, d11             \n"
-                    "vadd.s32   q6, q8              \n"
-                    "vadd.s32   q7, q9              \n"
+                    "vaddw.s16   q6, q6, d10        \n"
+                    "vaddw.s16   q7, q7, d11        \n"
                     "vst1.32    {d12-d15}, [%1]!    \n"
 
                     //mla
@@ -1098,10 +1151,8 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr1_s32
                     "pld        [%2, #256]          \n"
                     "vld1.32    {d12-d15}, [%2]     \n"
-                    "vmovl.s16  q8, d10             \n"
-                    "vmovl.s16  q9, d11             \n"
-                    "vadd.s32   q6, q8              \n"
-                    "vadd.s32   q7, q9              \n"
+                    "vaddw.s16   q6, q6, d10        \n"
+                    "vaddw.s16   q7, q7, d11        \n"
                     "vst1.32    {d12-d15}, [%2]!    \n"
 
                     //mla
@@ -1109,10 +1160,8 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr0_s32
                     "pld        [%3, #256]          \n"
                     "vld1.32    {d12-d15}, [%3]     \n"
-                    "vmovl.s16  q8, d10             \n"
-                    "vmovl.s16  q9, d11             \n"
-                    "vadd.s32   q6, q8              \n"
-                    "vadd.s32   q7, q9              \n"
+                    "vaddw.s16   q6, q6, d10        \n"
+                    "vaddw.s16   q7, q7, d11        \n"
                     "vst1.32    {d12-d15}, [%3]!    \n"
 
                     //mla
@@ -1120,10 +1169,8 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr0_s32
                     "pld        [%4, #256]          \n"
                     "vld1.32    {d12-d15}, [%4]     \n"
-                    "vmovl.s16  q8, d10             \n"
-                    "vmovl.s16  q9, d11             \n"
-                    "vadd.s32   q6, q8              \n"
-                    "vadd.s32   q7, q9              \n"
+                    "vaddw.s16   q6, q6, d10        \n"
+                    "vaddw.s16   q7, q7, d11        \n"
                     "vst1.32    {d12-d15}, [%4]!    \n"
 
                     "subs       %0, #1              \n"
@@ -1252,10 +1299,8 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr0_s32
                     "pld        [%1, #256]          \n"
                     "vld1.32    {d20-d23}, [%1]     \n" //outptr0_s32
-                    "vmovl.s16  q12, d16            \n"
-                    "vmovl.s16  q13, d17            \n"
-                    "vadd.s32   q10, q12            \n"
-                    "vadd.s32   q11, q13            \n"
+                    "vaddw.s16   q10, q10, d16      \n"
+                    "vaddw.s16   q11, q11, d17      \n"
                     "vst1.32    {d20-d23}, [%1]!    \n"
 
                     //next
@@ -1334,10 +1379,8 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
                     //outptr0_s32
                     "pld        [%1, #256]          \n"
                     "vld1.32    {d12-d15}, [%1]     \n"
-                    "vmovl.s16  q8, d10             \n"
-                    "vmovl.s16  q9, d11             \n"
-                    "vadd.s32   q6, q8              \n"
-                    "vadd.s32   q7, q9              \n"
+                    "vaddw.s16   q6, q6, d10        \n"
+                    "vaddw.s16   q7, q7, d11        \n"
                     "vst1.32    {d12-d15}, [%1]!    \n"
 
                     "subs       %0, #1              \n"
@@ -1366,7 +1409,7 @@ static void conv1x1s1_neon_s8_left4(const Mat& bottom_blob, Mat& top_blob, const
     }
 }
 
-static void conv1x1s1_neon_s8_inter(const Mat& bottom_blob, Mat& top_blob, const Mat& _kernel, const Option& opt)
+static void conv1x1s1_int8_neon(const Mat& bottom_blob, Mat& top_blob, const Mat& _kernel, const Option& opt)
 {
     int size = top_blob.h * top_blob.w;
     int remain = size & 7;
@@ -1390,4 +1433,106 @@ static void conv1x1s1_neon_s8_inter(const Mat& bottom_blob, Mat& top_blob, const
     conv(bottom_blob, top_blob, _kernel, opt);
 
     return;
+}
+#endif // __aarch64__
+
+static void conv1x1s2_int8_neon(const Mat &bottom_blob, Mat &top_blob, const Mat &_kernel, const Option& opt)
+{
+    int w = bottom_blob.w;
+    int inch = bottom_blob.c;
+
+    int outw = top_blob.w;
+    int outh = top_blob.h;
+    int outch = top_blob.c;
+
+    const int tailstep = w - 2*outw + w;
+    const signed char *kernel = _kernel;
+
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (int p = 0; p < outch; p++)
+    {
+        Mat out0 = top_blob.channel(p);
+
+        out0.fill(0);
+
+        int q = 0;
+
+        for (; q+7<inch; q+=8)
+        {
+            int* outptr0 = out0;
+
+            const signed char *kernel0 = (const signed char *)kernel + p * inch + q;
+
+            const signed char *r0 = bottom_blob.channel(q);
+            const signed char *r1 = bottom_blob.channel(q + 1);
+            const signed char *r2 = bottom_blob.channel(q + 2);
+            const signed char *r3 = bottom_blob.channel(q + 3);
+            const signed char *r4 = bottom_blob.channel(q + 4);
+            const signed char *r5 = bottom_blob.channel(q + 5);
+            const signed char *r6 = bottom_blob.channel(q + 6);
+            const signed char *r7 = bottom_blob.channel(q + 7);
+
+            for(int i = 0; i < outh; i++)
+            {
+                int remain = outw;
+
+                for (; remain > 0; remain--)
+                {
+                    //ToDo Neon
+                    int sum0 = (int)*r0 * (int)kernel0[0] + (int)*r1 * (int)kernel0[1] +
+                            (int)*r2 * (int)kernel0[2] + (int)*r3 * (int)kernel0[3] +
+                            (int)*r4 * (int)kernel0[4] + (int)*r5 * (int)kernel0[5] +
+                            (int)*r6 * (int)kernel0[6] + (int)*r7 * (int)kernel0[7];
+
+                    *outptr0 += sum0;
+
+                    r0 += 2;
+                    r1 += 2;
+                    r2 += 2;
+                    r3 += 2;
+                    r4 += 2;
+                    r5 += 2;
+                    r6 += 2;
+                    r7 += 2;
+                    outptr0++;
+                }
+
+                r0 += tailstep;
+                r1 += tailstep;
+                r2 += tailstep;
+                r3 += tailstep;
+                r4 += tailstep;
+                r5 += tailstep;
+                r6 += tailstep;
+                r7 += tailstep;
+            }
+        }
+
+        for (; q<inch; q++)
+        {
+            int* outptr0 = out0;
+
+            const signed char *r0 = bottom_blob.channel(q);
+
+            const signed char *kernel0 = (const signed char *)kernel + p * inch + q;
+
+            for(int i = 0; i < outh; i++)
+            {
+                int remain = outw;
+
+                for (; remain > 0; remain--)
+                {
+                    //ToDo Neon
+                    int sum0 = (int)*r0 * (int)kernel0[0];
+
+                    *outptr0 += sum0;
+
+                    r0 += 2;
+                    outptr0++;
+                }
+
+                r0 += tailstep;
+            }
+        }
+    }
 }

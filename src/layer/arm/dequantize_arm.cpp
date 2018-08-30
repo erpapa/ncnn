@@ -53,6 +53,43 @@ int Dequantize_arm::forward_inplace(Mat& bottom_top_blob, const Option& opt) con
         }
     }
 
+    if (dims == 2)
+    {
+        int w = bottom_top_blob.w;
+        int h = bottom_top_blob.h;
+
+        if (bias_term)
+        {
+            #pragma omp parallel for num_threads(opt.num_threads)
+            for (int i=0; i<h; i++)
+            {
+                const int* intptr = bottom_top_blob.row<const int>(i);
+                float* ptr = bottom_top_blob.row(i);
+
+                float bias = bias_data_size > 1 ? bias_data[i] : bias_data[0];
+
+                for (int j=0; j<w; j++)
+                {
+                    ptr[j] = intptr[j] * scale + bias;
+                }
+            }
+        }
+        else
+        {
+            #pragma omp parallel for num_threads(opt.num_threads)
+            for (int i=0; i<h; i++)
+            {
+                const int* intptr = bottom_top_blob.row<const int>(i);
+                float* ptr = bottom_top_blob.row(i);
+
+                for (int j=0; j<w; j++)
+                {
+                    ptr[j] = intptr[j] * scale;
+                }
+            }
+        }
+    }
+
     if (dims == 3)
     {
         int w = bottom_top_blob.w;
@@ -90,8 +127,8 @@ int Dequantize_arm::forward_inplace(Mat& bottom_top_blob, const Option& opt) con
                     "vdup.f32   q12, %7             \n" //q12 bias
 
                     "0:                             \n"
-                    "vcvtr.f32.s32 q0, q0           \n"
-                    "vcvtr.f32.s32 q1, q1           \n"
+                    "vcvt.f32.s32 q0, q0           \n"
+                    "vcvt.f32.s32 q1, q1           \n"
 
                     "vmul.f32   q0,q0,q10           \n"
                     "vmul.f32   q1,q1,q10           \n"
@@ -156,8 +193,8 @@ int Dequantize_arm::forward_inplace(Mat& bottom_top_blob, const Option& opt) con
                     "vdup.f32   q10, %6             \n" //q10 scale
 
                     "0:                             \n"
-                    "vcvtr.f32.s32 q0, q0           \n"
-                    "vcvtr.f32.s32 q1, q1           \n"
+                    "vcvt.f32.s32 q0, q0           \n"
+                    "vcvt.f32.s32 q1, q1           \n"
 
                     "vmul.f32   q0,q0,q10           \n"
                     "vmul.f32   q1,q1,q10           \n"

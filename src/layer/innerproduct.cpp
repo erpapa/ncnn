@@ -40,9 +40,12 @@ int InnerProduct::load_param(const ParamDict& pd)
     num_output = pd.get(0, 0);
     bias_term = pd.get(1, 0);
     weight_data_size = pd.get(2, 0);
-    weight_data_int8_scale = pd.get(8, 0.f);
+    int8_scale_term = pd.get(8, 0);
 
     use_int8_inference = pd.use_int8_inference;
+
+    if (int8_scale_term == 0)
+        use_int8_inference = false;
 
     return 0;
 }
@@ -58,6 +61,12 @@ int InnerProduct::load_model(const ModelBin& mb)
         bias_data = mb.load(num_output, 1);
         if (bias_data.empty())
             return -100;
+    }
+
+    if (int8_scale_term)
+    {
+        weight_data_int8_scale = mb.load(1, 1)[0];
+        bottom_blob_int8_scale = mb.load(1, 1)[0];
     }
 
     bool weight_data_is_int8 = (weight_data.elemsize == (size_t)1u);
@@ -77,27 +86,19 @@ int InnerProduct::load_model(const ModelBin& mb)
 
     if (weight_data_is_float32 && use_int8_inference)
     {
-        if (weight_data_int8_scale != 0.f)
-        {
-            // quantize weight to int8
-            ncnn::ParamDict pd;
-            pd.set(0, weight_data_int8_scale);// scale
+        // quantize weight to int8
+        ncnn::ParamDict pd;
+        pd.set(0, weight_data_int8_scale);// scale
 
-            quantize->load_param(pd);
+        quantize->load_param(pd);
 
-            Mat int8_weight_data;
-            quantize->forward(weight_data, int8_weight_data);
+        Mat int8_weight_data;
+        quantize->forward(weight_data, int8_weight_data);
 
-            if (int8_weight_data.empty())
-                return -100;
+        if (int8_weight_data.empty())
+            return -100;
 
-            weight_data = int8_weight_data;
-        }
-        else
-        {
-            // plain float32 weight, fallback to float32 inference
-            use_int8_inference = false;
-        }
+        weight_data = int8_weight_data;
     }
 
     return 0;
@@ -122,13 +123,10 @@ int InnerProduct::forward(const Mat& bottom_blob, Mat& top_blob, const Option& o
         if (bottom_blob_int8.empty())
             return -100;
 
-        float bottom_scale = opt.int8_scales[0];
-//         fprintf(stderr, "bottom_scale = %f\n", bottom_scale);
-
         // quantize, scale and round to nearest
         {
             ncnn::ParamDict pd;
-            pd.set(0, bottom_scale);// scale
+            pd.set(0, bottom_blob_int8_scale);// scale
 
             quantize->load_param(pd);
 
@@ -158,7 +156,7 @@ int InnerProduct::forward(const Mat& bottom_blob, Mat& top_blob, const Option& o
 
         // dequantize, reverse scale inplace
         {
-            float top_rescale = 1.f / (bottom_scale * weight_data_int8_scale);
+            float top_rescale = 1.f / (bottom_blob_int8_scale * weight_data_int8_scale);
 
             ncnn::ParamDict pd;
             pd.set(0, top_rescale);// scale

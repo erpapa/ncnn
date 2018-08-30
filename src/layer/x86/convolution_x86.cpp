@@ -81,25 +81,13 @@ int Convolution_x86::forwardDilation(const Mat& bottom_blob, Mat& top_blob, conv
             int inner_outw = (inner_w - kernel_size) / stride + 1;
             int inner_outh = (inner_h - kernel_size) / stride + 1;
 
-            if (inner_bottom_blob.w != inner_w || inner_bottom_blob.h != inner_h)
-            {
-                inner_bottom_blob.create(inner_w, inner_h, bottom_blob.c, elemsize, opt.workspace_allocator);
+            inner_bottom_blob.create(inner_w, inner_h, bottom_blob.c, elemsize, opt.workspace_allocator);
+            if (inner_bottom_blob.empty())
+                return -100;
 
-                if (inner_bottom_blob.empty())
-                {
-                    return -100;
-                }
-            }
-
-            if (inner_top_blob.w != inner_outw || inner_top_blob.h != inner_outh)
-            {
-                inner_top_blob.create(inner_outw, inner_outh, num_output, elemsize, opt.workspace_allocator);
-
-                if (inner_top_blob.empty())
-                {
-                    return -100;
-                }
-            }
+            inner_top_blob.create(inner_outw, inner_outh, num_output, elemsize, opt.workspace_allocator);
+            if (inner_top_blob.empty())
+                return -100;
 
             #pragma omp parallel for num_threads(opt.num_threads)
             for (int c = 0; c < bottom_blob.c; c ++)
@@ -117,7 +105,9 @@ int Convolution_x86::forwardDilation(const Mat& bottom_blob, Mat& top_blob, conv
                 }
             }
 
-            conv(inner_bottom_blob, inner_top_blob, weight_data, bias_data, opt);
+            ncnn::Option opt_g = opt;
+            opt_g.blob_allocator = inner_top_blob.allocator;
+            conv(inner_bottom_blob, inner_top_blob, weight_data, bias_data, opt_g);
 
             #pragma omp parallel for num_threads(opt.num_threads)
             for (int c = 0; c < num_output; c ++)
@@ -138,7 +128,6 @@ int Convolution_x86::forwardDilation(const Mat& bottom_blob, Mat& top_blob, conv
 
     return 0;
 }
-
 
 int Convolution_x86::forward(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const
 {
@@ -266,7 +255,11 @@ int Convolution_x86::forward(const Mat& bottom_blob, Mat& top_blob, const Option
             return Convolution::forward(bottom_blob, top_blob, opt);
         }
 
-        if (dilation_w != 1) {
+        if (dilation_w != 1)
+        {
+            if (stride != 1)
+                return Convolution::forward(bottom_blob, top_blob, opt);
+
             return forwardDilation(bottom_blob, top_blob, conv, opt);
         }
     }
@@ -276,10 +269,29 @@ int Convolution_x86::forward(const Mat& bottom_blob, Mat& top_blob, const Option
     int channels = bottom_blob.c;
     size_t elemsize = bottom_blob.elemsize;
 
-    Mat bottom_blob_bordered = bottom_blob;
+    Mat bottom_blob_unbordered = bottom_blob;
+    if (use_int8_inference && elemsize != 1)
+    {
+        Mat bottom_blob_int8;
+        bottom_blob_int8.create(w, h, channels, (size_t)1u, opt.workspace_allocator);
+        if (bottom_blob_int8.empty())
+            return -100;
+
+        // quantize, scale and round to nearest
+        {
+            ncnn::Option opt_g = opt;
+            opt_g.blob_allocator = bottom_blob_int8.allocator;
+
+            quantize->forward(bottom_blob, bottom_blob_int8, opt_g);
+        }
+
+        bottom_blob_unbordered = bottom_blob_int8;
+    }
+
+    Mat bottom_blob_bordered = bottom_blob_unbordered;
     if (pad_w > 0 || pad_h > 0)
     {
-        copy_make_border(bottom_blob, bottom_blob_bordered, pad_h, pad_h, pad_w, pad_w, BORDER_CONSTANT, 0.f, opt.workspace_allocator, opt.num_threads);
+        copy_make_border(bottom_blob_unbordered, bottom_blob_bordered, pad_h, pad_h, pad_w, pad_w, BORDER_CONSTANT, 0.f, opt.workspace_allocator, opt.num_threads);
         if (bottom_blob_bordered.empty())
             return -100;
 
@@ -292,7 +304,7 @@ int Convolution_x86::forward(const Mat& bottom_blob, Mat& top_blob, const Option
         int hpad = kernel_size + (h - 1) / stride * stride - h;
         if (wpad > 0 || hpad > 0)
         {
-            copy_make_border(bottom_blob, bottom_blob_bordered, hpad / 2, hpad - hpad / 2, wpad / 2, wpad - wpad / 2, BORDER_CONSTANT, 0.f, opt.workspace_allocator, opt.num_threads);
+            copy_make_border(bottom_blob_unbordered, bottom_blob_bordered, hpad / 2, hpad - hpad / 2, wpad / 2, wpad - wpad / 2, BORDER_CONSTANT, 0.f, opt.workspace_allocator, opt.num_threads);
             if (bottom_blob_bordered.empty())
                 return -100;
         }
@@ -310,43 +322,14 @@ int Convolution_x86::forward(const Mat& bottom_blob, Mat& top_blob, const Option
 
     if (use_int8_inference)
     {
-        Mat bottom_blob_bordered_int8;
-        bottom_blob_bordered_int8.create(w, h, channels, (size_t)1u, opt.workspace_allocator);
-        if (bottom_blob_bordered_int8.empty())
-            return -100;
-
-        float bottom_scale = opt.int8_scales[0];
-//         fprintf(stderr, "bottom_scale = %f\n", bottom_scale);
-
-        // quantize, scale and round to nearest
-        {
-            ncnn::ParamDict pd;
-            pd.set(0, bottom_scale);// scale
-
-            quantize->load_param(pd);
-
-            quantize->forward(bottom_blob_bordered, bottom_blob_bordered_int8, opt);
-        }
-
-        conv_int8(bottom_blob_bordered_int8, top_blob, weight_data, opt);
+        conv_int8(bottom_blob_bordered, top_blob, weight_data, opt);
 
         // dequantize, reverse scale inplace
         {
-            float top_rescale = 1.f / (bottom_scale * weight_data_int8_scale);
+            ncnn::Option opt_g = opt;
+            opt_g.blob_allocator = top_blob.allocator;
 
-            ncnn::ParamDict pd;
-            pd.set(0, top_rescale);// scale
-            pd.set(1, bias_term);// bias_term
-            pd.set(2, num_output);// bias_data_size
-
-            dequantize->load_param(pd);
-
-            ncnn::Mat weights[1];
-            weights[0] = bias_data;
-
-            dequantize->load_model(ModelBinFromMatArray(weights));
-
-            dequantize->forward_inplace(top_blob, opt);
+            dequantize->forward_inplace(top_blob, opt_g);
         }
 
         return 0;

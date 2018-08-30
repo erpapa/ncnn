@@ -224,60 +224,6 @@ int Net::load_param(FILE* fp)
         layers[i] = layer;
     }
 
-    while (!feof(fp))
-    {
-        int nscan = 0;
-
-        char blob_name[257];
-        nscan = fscanf(fp, "%256s", blob_name);
-        if (nscan != 1)
-        {
-            continue;
-        }
-
-        int blob_index = find_blob_index_by_name(blob_name);
-        if (blob_index == -1)
-        {
-            clear();
-            return -1;
-        }
-
-        Blob& blob = blobs[blob_index];
-
-        // blob specific params
-        int pdlr = pd.load_param(fp);
-        if (pdlr != 0)
-        {
-            fprintf(stderr, "ParamDict load_param failed\n");
-            continue;
-        }
-
-        // set blob params
-        blob.int8_scale = pd.get(0, 0.f);
-    }
-
-    // fill all blob int8_scale
-    if (use_int8_inference)
-    {
-        for (int i=0; i<blob_count; i++)
-        {
-            Blob& blob = blobs[i];
-
-            if (blob.int8_scale != 0.f)
-                continue;
-
-            if (blob.producer == -1)
-                continue;
-
-            const Layer* layer = layers[blob.producer];
-            if (layer->bottoms.size() != 1)
-                continue;
-
-            const Blob& prev_blob = blobs[layer->bottoms[0]];
-            blob.int8_scale = prev_blob.int8_scale;
-        }
-    }
-
     return 0;
 }
 
@@ -395,48 +341,6 @@ int Net::load_param_bin(FILE* fp)
         }
 
         layers[i] = layer;
-    }
-
-    int blob_index;
-    fread(&blob_index, sizeof(int), 1, fp);
-    while (blob_index != -233)
-    {
-        Blob& blob = blobs[blob_index];
-
-        // blob specific params
-        int pdlr = pd.load_param_bin(fp);
-        if (pdlr != 0)
-        {
-            fprintf(stderr, "ParamDict load_param failed\n");
-            continue;
-        }
-
-        // set blob params
-        blob.int8_scale = pd.get(0, 0.f);
-
-        fread(&blob_index, sizeof(int), 1, fp);
-    }
-
-    // fill all blob int8_scale
-    if (use_int8_inference)
-    {
-        for (int i=0; i<blob_count; i++)
-        {
-            Blob& blob = blobs[i];
-
-            if (blob.int8_scale != 0.f)
-                continue;
-
-            if (blob.producer == -1)
-                continue;
-
-            const Layer* layer = layers[blob.producer];
-            if (layer->bottoms.size() != 1)
-                continue;
-
-            const Blob& prev_blob = blobs[layer->bottoms[0]];
-            blob.int8_scale = prev_blob.int8_scale;
-        }
     }
 
     return 0;
@@ -612,49 +516,6 @@ int Net::load_param(const unsigned char* _mem)
         layers[i] = layer;
     }
 
-    int blob_index = *(int*)mem;
-    mem += 4;
-    while (blob_index != -233)
-    {
-        Blob& blob = blobs[blob_index];
-
-        // blob specific params
-        int pdlr = pd.load_param(mem);
-        if (pdlr != 0)
-        {
-            fprintf(stderr, "ParamDict load_param failed\n");
-            continue;
-        }
-
-        // set blob params
-        blob.int8_scale = pd.get(0, 0.f);
-
-        blob_index = *(int*)mem;
-        mem += 4;
-    }
-
-    // fill all blob int8_scale
-    if (use_int8_inference)
-    {
-        for (int i=0; i<blob_count; i++)
-        {
-            Blob& blob = blobs[i];
-
-            if (blob.int8_scale != 0.f)
-                continue;
-
-            if (blob.producer == -1)
-                continue;
-
-            const Layer* layer = layers[blob.producer];
-            if (layer->bottoms.size() != 1)
-                continue;
-
-            const Blob& prev_blob = blobs[layer->bottoms[0]];
-            blob.int8_scale = prev_blob.int8_scale;
-        }
-    }
-
     return mem - _mem;
 }
 
@@ -792,9 +653,6 @@ int Net::forward_layer(int layer_index, std::vector<Mat>& blob_mats, Option& opt
 
         Mat bottom_blob = blob_mats[bottom_blob_index];
 
-        opt.int8_scales.resize(1);
-        opt.int8_scales[0] = blobs[bottom_blob_index].int8_scale;
-
         if (opt.lightmode)
         {
             // delete after taken in light mode
@@ -848,7 +706,6 @@ int Net::forward_layer(int layer_index, std::vector<Mat>& blob_mats, Option& opt
         // load bottom blobs
         std::vector<Mat> bottom_blobs;
         bottom_blobs.resize(layer->bottoms.size());
-        opt.int8_scales.resize(layer->bottoms.size());
         for (size_t i=0; i<layer->bottoms.size(); i++)
         {
             int bottom_blob_index = layer->bottoms[i];
@@ -861,8 +718,6 @@ int Net::forward_layer(int layer_index, std::vector<Mat>& blob_mats, Option& opt
             }
 
             bottom_blobs[i] = blob_mats[bottom_blob_index];
-
-            opt.int8_scales[i] = blobs[bottom_blob_index].int8_scale;
 
             if (opt.lightmode)
             {

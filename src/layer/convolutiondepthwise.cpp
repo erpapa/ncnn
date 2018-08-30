@@ -24,15 +24,19 @@ ConvolutionDepthWise::ConvolutionDepthWise()
 {
     one_blob_only = true;
     support_inplace = false;
-
-    quantize = 0;
-    dequantize = 0;
 }
 
 ConvolutionDepthWise::~ConvolutionDepthWise()
 {
-    delete quantize;
-    delete dequantize;
+    for (int i=0; i<(int)quantize_ops.size(); i++)
+        delete quantize_ops[i];
+
+    quantize_ops.clear();
+
+    for (int i=0; i<(int)dequantize_ops.size(); i++)
+        delete dequantize_ops[i];
+
+    dequantize_ops.clear();
 }
 
 int ConvolutionDepthWise::load_param(const ParamDict& pd)
@@ -49,7 +53,7 @@ int ConvolutionDepthWise::load_param(const ParamDict& pd)
     bias_term = pd.get(5, 0);
     weight_data_size = pd.get(6, 0);
     group = pd.get(7, 1);
-    weight_data_int8_scale = pd.get(8, 0.f);
+    int8_scale_term = pd.get(8, 0);
 
     use_int8_inference = pd.use_int8_inference;
 
@@ -58,6 +62,9 @@ int ConvolutionDepthWise::load_param(const ParamDict& pd)
         // reject invalid group
         return -100;
     }
+
+    if (int8_scale_term == 0)
+        use_int8_inference = false;
 
     return 0;
 }
@@ -75,6 +82,36 @@ int ConvolutionDepthWise::load_model(const ModelBin& mb)
             return -100;
     }
 
+    if (int8_scale_term == 1)
+    {
+        weight_data_int8_scales = mb.load(group, 1);
+        bottom_blob_int8_scales = mb.load(group, 1);
+    }
+    else if (int8_scale_term == 2)
+    {
+        weight_data_int8_scales = mb.load(1, 1);
+        bottom_blob_int8_scales = mb.load(1, 1);
+
+        // extend group if only one provided
+        float weight_data_int8_scale = weight_data_int8_scales[0];
+        weight_data_int8_scales = Mat(group);
+        weight_data_int8_scales.fill(weight_data_int8_scale);
+
+        float bottom_blob_int8_scale = bottom_blob_int8_scales[0];
+        bottom_blob_int8_scales = Mat(group);
+        bottom_blob_int8_scales.fill(bottom_blob_int8_scale);
+    }
+
+    for (int i=0; i<(int)quantize_ops.size(); i++)
+        delete quantize_ops[i];
+
+    quantize_ops.clear();
+
+    for (int i=0; i<(int)dequantize_ops.size(); i++)
+        delete dequantize_ops[i];
+
+    dequantize_ops.clear();
+
     bool weight_data_is_int8 = (weight_data.elemsize == (size_t)1u);
     bool weight_data_is_float32 = (weight_data.elemsize == (size_t)4u);
 
@@ -84,34 +121,69 @@ int ConvolutionDepthWise::load_model(const ModelBin& mb)
         return -1;
     }
 
-    if (use_int8_inference)
-    {
-        quantize = ncnn::create_layer(ncnn::LayerType::Quantize);
-        dequantize = ncnn::create_layer(ncnn::LayerType::Dequantize);
-    }
-
     if (weight_data_is_float32 && use_int8_inference)
     {
-        if (weight_data_int8_scale != 0.f)
+        // quantize weight to int8
+        Mat int8_weight_data(weight_data_size, (size_t)1u);
+        if (int8_weight_data.empty())
+            return -100;
+
+        const int weight_data_size_g = weight_data_size / group;
+
+        for (int g=0; g<group; g++)
         {
-            // quantize weight to int8
+            Layer* op = ncnn::create_layer(ncnn::LayerType::Quantize);
+
             ncnn::ParamDict pd;
-            pd.set(0, weight_data_int8_scale);// scale
+            pd.set(0, weight_data_int8_scales[g]);// scale
 
-            quantize->load_param(pd);
+            op->load_param(pd);
 
-            Mat int8_weight_data;
-            quantize->forward(weight_data, int8_weight_data);
+            ncnn::Option opt = ncnn::get_default_option();
+            opt.blob_allocator = int8_weight_data.allocator;
 
-            if (int8_weight_data.empty())
-                return -100;
+            const Mat weight_data_g = weight_data.range(weight_data_size_g * g, weight_data_size_g);
+            Mat int8_weight_data_g = int8_weight_data.range(weight_data_size_g * g, weight_data_size_g);
+            op->forward(weight_data_g, int8_weight_data_g, opt);
 
-            weight_data = int8_weight_data;
+            delete op;
         }
-        else
+
+        weight_data = int8_weight_data;
+    }
+
+    if (use_int8_inference)
+    {
+        quantize_ops.resize(group);
+        dequantize_ops.resize(group);
+
+        for (int g=0; g<group; g++)
         {
-            // plain float32 weight, fallback to float32 inference
-            use_int8_inference = false;
+            quantize_ops[g] = ncnn::create_layer(ncnn::LayerType::Quantize);
+
+            ncnn::ParamDict pd;
+            pd.set(0, bottom_blob_int8_scales[g]);// scale
+
+            quantize_ops[g]->load_param(pd);
+        }
+
+        for (int g=0; g<group; g++)
+        {
+            dequantize_ops[g] = ncnn::create_layer(ncnn::LayerType::Dequantize);
+
+            float top_rescale = 1.f / (bottom_blob_int8_scales[g] * weight_data_int8_scales[g]);
+
+            ncnn::ParamDict pd;
+            pd.set(0, top_rescale);// scale
+            pd.set(1, bias_term);// bias_term
+            pd.set(2, 1);// bias_data_size
+
+            dequantize_ops[g]->load_param(pd);
+
+            ncnn::Mat weights[1];
+            weights[0] = bias_data.range(g, 1);
+
+            dequantize_ops[g]->load_model(ModelBinFromMatArray(weights));
         }
     }
 
@@ -139,10 +211,36 @@ int ConvolutionDepthWise::forward(const Mat& bottom_blob, Mat& top_blob, const O
     const int kernel_extent_w = dilation_w * (kernel_w - 1) + 1;
     const int kernel_extent_h = dilation_h * (kernel_h - 1) + 1;
 
-    Mat bottom_blob_bordered = bottom_blob;
+    Mat bottom_blob_unbordered = bottom_blob;
+    if (use_int8_inference && elemsize != 1)
+    {
+        Mat bottom_blob_int8;
+        bottom_blob_int8.create(w, h, channels, (size_t)1u, opt.workspace_allocator);
+        if (bottom_blob_int8.empty())
+            return -100;
+
+        const int channels_g = channels / group;
+
+        // quantize, scale and round to nearest
+        #pragma omp parallel for num_threads(opt.num_threads)
+        for (int g=0; g<group; g++)
+        {
+            ncnn::Option opt_g = opt;
+            opt_g.num_threads = 1;
+            opt_g.blob_allocator = bottom_blob_int8.allocator;
+
+            const Mat bottom_blob_g = bottom_blob.channel_range(channels_g * g, channels_g);
+            Mat bottom_blob_int8_g = bottom_blob_int8.channel_range(channels_g * g, channels_g);
+            quantize_ops[g]->forward(bottom_blob_g, bottom_blob_int8_g, opt_g);
+        }
+
+        bottom_blob_unbordered = bottom_blob_int8;
+    }
+
+    Mat bottom_blob_bordered = bottom_blob_unbordered;
     if (pad_w > 0 || pad_h > 0)
     {
-        copy_make_border(bottom_blob, bottom_blob_bordered, pad_h, pad_h, pad_w, pad_w, BORDER_CONSTANT, 0.f, opt.workspace_allocator, opt.num_threads);
+        copy_make_border(bottom_blob_unbordered, bottom_blob_bordered, pad_h, pad_h, pad_w, pad_w, BORDER_CONSTANT, 0.f, opt.workspace_allocator, opt.num_threads);
         if (bottom_blob_bordered.empty())
             return -100;
 
@@ -155,7 +253,7 @@ int ConvolutionDepthWise::forward(const Mat& bottom_blob, Mat& top_blob, const O
         int hpad = kernel_extent_h + (h - 1) / stride_h * stride_h - h;
         if (wpad > 0 || hpad > 0)
         {
-            copy_make_border(bottom_blob, bottom_blob_bordered, hpad / 2, hpad - hpad / 2, wpad / 2, wpad - wpad / 2, BORDER_CONSTANT, 0.f, opt.workspace_allocator, opt.num_threads);
+            copy_make_border(bottom_blob_unbordered, bottom_blob_bordered, hpad / 2, hpad - hpad / 2, wpad / 2, wpad - wpad / 2, BORDER_CONSTANT, 0.f, opt.workspace_allocator, opt.num_threads);
             if (bottom_blob_bordered.empty())
                 return -100;
         }
@@ -194,23 +292,6 @@ int ConvolutionDepthWise::forward(const Mat& bottom_blob, Mat& top_blob, const O
 
     if (use_int8_inference)
     {
-        Mat bottom_blob_bordered_int8;
-        bottom_blob_bordered_int8.create(w, h, channels, (size_t)1u, opt.workspace_allocator);
-        if (bottom_blob_bordered_int8.empty())
-            return -100;
-
-        float bottom_scale = opt.int8_scales[0];
-
-        // quantize, scale and round to nearest
-        {
-            ncnn::ParamDict pd;
-            pd.set(0, bottom_scale);// scale
-
-            quantize->load_param(pd);
-
-            quantize->forward(bottom_blob_bordered, bottom_blob_bordered_int8, opt);
-        }
-
         // depth-wise
         if (channels == group && group == num_output)
         {
@@ -219,7 +300,7 @@ int ConvolutionDepthWise::forward(const Mat& bottom_blob, Mat& top_blob, const O
             {
                 int* outptr = top_blob.channel(g);
                 const signed char* kptr = (const signed char*)weight_data + maxk * g;
-                const Mat m = bottom_blob_bordered_int8.channel(g);
+                const Mat m = bottom_blob_bordered.channel(g);
 
                 for (int i = 0; i < outh; i++)
                 {
@@ -240,6 +321,16 @@ int ConvolutionDepthWise::forward(const Mat& bottom_blob, Mat& top_blob, const O
                     }
 
                     outptr += outw;
+                }
+
+                // dequantize, reverse scale inplace
+                {
+                    ncnn::Option opt_g = opt;
+                    opt_g.num_threads = 1;
+                    opt_g.blob_allocator = top_blob.allocator;
+
+                    Mat top_blob_g = top_blob.channel_range(g, 1);
+                    dequantize_ops[g]->forward_inplace(top_blob_g, opt_g);
                 }
             }
         }
@@ -271,7 +362,7 @@ int ConvolutionDepthWise::forward(const Mat& bottom_blob, Mat& top_blob, const O
                             // channels_g
                             for (int q=0; q<channels_g; q++)
                             {
-                                const Mat m = bottom_blob_bordered_int8.channel(channels_g * g + q);
+                                const Mat m = bottom_blob_bordered.channel(channels_g * g + q);
                                 const signed char* sptr = m.row<signed char>(i*stride_h) + j*stride_w;
 
                                 for (int k = 0; k < maxk; k++)
@@ -291,25 +382,18 @@ int ConvolutionDepthWise::forward(const Mat& bottom_blob, Mat& top_blob, const O
                     }
                 }
             }
-        }
 
-        // dequantize, reverse scale inplace
-        {
-            float top_rescale = 1.f / (bottom_scale * weight_data_int8_scale);
+            // dequantize, reverse scale inplace
+            #pragma omp parallel for num_threads(opt.num_threads)
+            for (int g=0; g<group; g++)
+            {
+                ncnn::Option opt_g = opt;
+                opt_g.num_threads = 1;
+                opt_g.blob_allocator = top_blob.allocator;
 
-            ncnn::ParamDict pd;
-            pd.set(0, top_rescale);// scale
-            pd.set(1, bias_term);// bias_term
-            pd.set(2, num_output);// bias_data_size
-
-            dequantize->load_param(pd);
-
-            ncnn::Mat weights[1];
-            weights[0] = bias_data;
-
-            dequantize->load_model(ModelBinFromMatArray(weights));
-
-            dequantize->forward_inplace(top_blob, opt);
+                Mat top_blob_g = top_blob.channel_range(num_output_g * g, num_output_g);
+                dequantize_ops[g]->forward_inplace(top_blob_g, opt_g);
+            }
         }
 
         return 0;
